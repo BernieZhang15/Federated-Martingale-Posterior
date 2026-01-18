@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="boning@coppay.dcs.gla.ac.uk:22 password (5)" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
+  <component name="PublishConfigData" autoUpload="Always" serverName="boning@coppay.dcs.gla.ac.uk:22 password (6)" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
       <paths name="boning@coppay.dcs.gla.ac.uk:22 password">
@@ -13,7 +13,7 @@
       <paths name="boning@coppay.dcs.gla.ac.uk:22 password (2)">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/largeDisk/boning/federated_MP" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>
@@ -34,7 +34,28 @@
       <paths name="boning@coppay.dcs.gla.ac.uk:22 password (5)">
         <serverdata>
           <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="boning@coppay.dcs.gla.ac.uk:22 password (6)">
+        <serverdata>
+          <mappings>
             <mapping deploy="/home/largeDisk/boning/federated_MP" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@hz-jcy-1.matpool.com:26188 password">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@hz-jcy-1.matpool.com:26254 password">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

@@ -1,125 +1,129 @@
+import os
+import math
 import torch
 import numpy as np
 from models import MPNP
 from modules import ISAB
 import torch.optim as optim
-import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
-from torch.utils.data import TensorDataset, DataLoader, random_split
+from metric_utils import mmd_rbf2
+from data_utils.train_data import build_infinite_dataloader
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+os.makedirs("checkpoints", exist_ok=True)
 
-data = np.load("data/isab_dataset.npz")
-X_isab = data["X_isab"]
-y_isab = data["y_isab"]
+x_dim = 19
+y_dim = 1
 
-X_tensor = torch.from_numpy(X_isab).float()
-y_tensor = torch.from_numpy(y_isab).unsqueeze(1).float()
+bs = 24
+test_data = np.load("data/central_dataset.npz")
+Xc = torch.from_numpy(test_data["X_test"]).float()
+Yc = torch.from_numpy(test_data["y_test"]).float()
+W_star = torch.from_numpy(test_data["W_star"]).float().to(device)
 
-full_dataset = TensorDataset(X_tensor, y_tensor)
+dataloader = build_infinite_dataloader(
+        batch_size=64,
+        x_dim=19,
+        Pc=24,
+        Pt=24,
+        x_dist="normal",
+        x_range=(-2, 2),
+        w_dist="normal",
+        w_scale=1.0,
+        noise_dist="uniform",
+        noise_scale=0.1,
+        seed=42,
+        num_workers=0,
+    )
+it = iter(dataloader)
 
-val_ratio = 0.7
-n_total = len(full_dataset)
-n_val = int(val_ratio * n_total)
-n_train = int(n_total - n_val)
-
-train_dataset, val_dataset = random_split(full_dataset, lengths=[n_train, n_val], generator=torch.Generator().manual_seed(42))
-
-print(f"Total: {n_total}, Train: {n_train}, Val: {n_val}")
-train_loader = DataLoader(train_dataset, batch_size=120, shuffle=True, drop_last=False)
-val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, drop_last=False)
-
-context_x, context_y = next(iter(train_loader))
-context_x, context_y = context_x.to(device), context_y.to(device)
-context = torch.cat((context_x, context_y), dim=1)
-val_iter = iter(val_loader)
-
-isab_dim = context.size(1)
-x_dim = context_x.size(1)
-y_dim = context_y.size(1)
-
-K = 4
-epochs = int(5e3)
-model = MPNP(x_dim=x_dim, y_dim=y_dim).to(device)
-isab = ISAB(isab_dim, isab_dim, 5, 120, ln=True).to(device)
+num_samples = 8
+num_steps = int(1e6)
+model = MPNP(x_dim=x_dim, y_dim=y_dim, h=128, rep_dim=128).to(device)
+isab = ISAB(dim_out=x_dim + y_dim, dim_hidden=128, num_heads=8, num_inds=24).to(device)
 optimizer = optim.Adam(list(model.parameters()) + list(isab.parameters()), lr=5e-3)
 
-for i in range(epochs):
+@torch.no_grad()
+def sample_central(bs: int):
+    n = Xc.shape[0]
+    idx = torch.randint(0, n, (bs,))
+    Xb = Xc[idx].to(device)
+    yb = Yc[idx].to(device)
+    return Xb, yb
+
+
+for i in range(num_steps):
     model.train()
     isab.train()
-    try:
-        target_x, target_y = next(val_iter)
-    except StopIteration:
-        val_iter = iter(val_loader)
-        target_x, target_y = next(val_iter)
-    target_x, target_y = target_x.to(device), target_y.to(device)
+
+    batch = next(it)
+    x_ctx, y_ctx = batch["x_ctx"].to(device), batch["y_ctx"].to(device)
+    x_tar, y_tar = batch["x_tar"].to(device), batch["y_tar"].to(device)
+
+    target_x = torch.cat([x_ctx, x_tar], dim=1)
+    target_y = torch.cat([y_ctx, y_tar], dim=1)
+    N_all = target_x.shape[1]
 
     optimizer.zero_grad()
 
-    query_real = (context_x, context_y), target_x
-    log_prob_real, _, _ = model(query_real, target_y)
-    L_amort = -log_prob_real.sum()
+    # L_amort
+    log_prob_real, _, _ = model(((x_ctx, y_ctx), target_x), target_y) # (B, N_all)
+    lp_real = log_prob_real.sum(dim=tuple(range(1, log_prob_real.ndim)))
+    L_amort = - (lp_real / N_all).mean()
 
-    losses_aug = []
-    losses_pseudo = []
+    context = torch.cat((x_ctx, y_ctx), dim=-1) # [B, N_ctx, D]
+    contextK = context.unsqueeze(1).expand(-1, num_samples, -1, -1) # [B, K, N_ctx, D]
+    context_xK = contextK[..., :x_dim]
+    context_yK = contextK[..., x_dim:]
 
-    for k in range(K):
-        predictive = isab(context)
+    predK = isab(contextK) # [B, K, N_pred, D]
+    pred_xK = predK[..., :x_dim] # [B, K, N_pred, x_dim]
+    pred_yK = predK[..., x_dim:] # [B, K, N_pred, y_dim]
 
-        predictive_x = predictive[:, :x_dim]
-        predictive_y = predictive[:, x_dim:]
+    aug_xK = torch.cat((context_xK, pred_xK), dim=2)  # (B, K, N_ctx + N_pred, x_dim)
+    aug_yK = torch.cat((context_yK, pred_yK), dim=2)
 
-        aug_x = torch.cat((context_x, predictive_x), dim=0)
-        aug_y = torch.cat((context_y, predictive_y), dim=0)
+    target_xK = target_x.unsqueeze(1).expand(-1, num_samples, -1, -1)  # (B, K, N_tar, x_dim)
+    target_yK = target_y.unsqueeze(1).expand(-1, num_samples, -1, -1)
 
-        query = (aug_x, aug_y), target_x
-        query_pseudo = (predictive_x, predictive_y), target_x
+    # L_marg
+    log_probK, _, _ = model(((aug_xK, aug_yK), target_xK), target_yK) # (B, K, N_all)
+    lpK = log_probK.sum(dim=tuple(range(2, log_probK.ndim))) # (B, K)
+    logmeanexp_K = torch.logsumexp(lpK, dim=1) - math.log(num_samples) # [B]
+    L_marg = - (logmeanexp_K / N_all).mean() # scalar
 
-        log_prob, _, _ = model(query, target_y)
-        log_prob_pseudo, _, _ = model(query_pseudo, target_y)
+    # L_pseudo
+    log_prob_pseudoK, _, _ = model(((pred_xK, pred_yK), target_xK), target_yK) # (B, K, N_all)
+    lpPseudo = log_prob_pseudoK.sum(dim=tuple(range(2, log_prob_pseudoK.ndim))) # [B, K]
+    L_pseudo = - (lpPseudo.mean(dim=1) / N_all).mean() # scalar (mean over K, then over B)
 
-        losses_aug.append(-log_prob.sum())
-        losses_pseudo.append(-log_prob_pseudo.sum())
-
-    L_marg = - torch.logsumexp(torch.stack([-L for L in losses_aug]), dim=0) - torch.log(torch.tensor(K, device=device))
-    L_pseudo = sum(losses_pseudo) / K
-
-    loss = L_marg + L_pseudo + L_amort
-
+    loss = L_marg + L_amort + L_pseudo
     loss.backward()
     optimizer.step()
 
-    if (i + 1) % 500 == 0:
-        print(f'Iteration {i + 1}: Loss: {loss.item():.4f}')
-        save_path = "checkpoint/isab_model.pt"
+    if i % 1000 == 0:
+        save_path = "checkpoints/isab_model.pt"
         torch.save(isab.state_dict(), save_path)
 
+        isab.eval()
+        with (torch.no_grad()):
+            Xb, yb = sample_central(bs)
+            context_real = torch.cat([Xb, yb], dim=-1).unsqueeze(0)
 
-isab.eval()
+            w = W_star[0].view(x_dim, 1)
 
-fig, axes = plt.subplots(2, 2, figsize=(10, 10))
-axes = axes.flatten()
+            pred_xy = isab(context_real).squeeze(0)
+            pred_x = pred_xy[..., :x_dim]
+            pred_y = pred_xy[..., x_dim:]
 
-with torch.no_grad():
-    for k in range(4):
-        predictive = isab(context)
+            res_real = yb - Xb @ w
+            res_pred = pred_y - pred_x @ w
 
-        X_vis = torch.cat([context, predictive], dim=0)
-        labels = np.concatenate([np.zeros(context.size(0)), np.ones(predictive.size(0))])
+            mmd_res = mmd_rbf2(res_real, res_pred)
+            mmd_x = mmd_rbf2(Xb, pred_x)
 
-        X_vis = X_vis.cpu().detach().numpy()
+        print(
+            f"[step {i}] "
+            f"L_amort={float(L_amort):.6g}  L_marg={float(L_marg):.6g}  L_pseudo={float(L_pseudo):.6g}  loss={float(loss):.6g}  "
+            f"MMD^2(residual)={mmd_res:.4g} MMD^2(x)={mmd_x:.4g}"
+        )
 
-        tsne = TSNE(n_components=2, perplexity=30, learning_rate=200, max_iter=1000, init='pca', random_state=42)
-
-        X_2d = tsne.fit_transform(X_vis)
-
-        ax = axes[k]
-
-        ax.scatter(X_2d[labels == 0, 0], X_2d[labels == 0, 1], alpha=0.7, label="real context", c='tab:blue')
-        ax.scatter(X_2d[labels == 1, 0], X_2d[labels == 1, 1], alpha=0.7, label="predictive", c='tab:orange')
-
-        ax.set_title(f'Predictive sample {k + 1}')
-
-plt.tight_layout()
-plt.legend()
-plt.show()
